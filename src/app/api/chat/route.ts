@@ -13,6 +13,7 @@ import {
   PRODUCT_INSIGHT_MINER_PROMPT,
   AI_AGENT_PRD_WRITER_PROMPT,
 } from "@/lib/product-chain-prompt";
+import { HUASHU_DESIGN_PROMPT } from "@/lib/huashu-design-prompt";
 
 export const maxDuration = 60;
 
@@ -58,6 +59,11 @@ const SKILL_REGISTRY: Record<string, { prompt: string; intro: string }> = {
   article_cowriter: {
     prompt: SIMIN_ARTICLE_COWRITER_PROMPT,
     intro: "✍️ **文章共创** — 帮你写出有深度、可传播的干货长文",
+  },
+  // 原型设计
+  huashu_design: {
+    prompt: HUASHU_DESIGN_PROMPT,
+    intro: "🎨 **花叔原型设计** — 用 HTML 做高保真产品原型、交互 Demo、App mockup",
   },
 };
 
@@ -112,7 +118,7 @@ function getSkillTools() {
 }
 
 export async function POST(req: Request) {
-  const { messages } = await req.json();
+  const { messages, skill: manualSkill } = await req.json();
 
   const userMessages = messages.filter(
     (m: { role: string }) => m.role === "user"
@@ -120,7 +126,11 @@ export async function POST(req: Request) {
   const firstUserText: string =
     userMessages.length > 0 ? userMessages[0].content || "" : "";
 
-  const skillIntent = detectSkillIntent(firstUserText);
+  // 手动选择的 skill 优先于自动检测
+  const skillIntent =
+    manualSkill && manualSkill !== "auto"
+      ? manualSkill
+      : detectSkillIntent(firstUserText);
   const systemPrompt = getSystemPrompt(skillIntent);
   const tools = getSkillTools();
 

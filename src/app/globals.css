@@ -1,33 +1,80 @@
 @import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,400..700;1,9..40,400..700&family=JetBrains+Mono:ital,wght@0,400;0,500;1,400&display=swap');
 
 :root {
-  --background: #1a1a1a;
-  --foreground: #ededed;
+  --bg-root: #171411;
+  --bg-surface: #1F1C18;
+  --bg-elevated: #292520;
+  --bg-overlay: #2E2A25;
+  --border-subtle: #2A2621;
+  --border-default: #36312B;
+  --text-primary: #EDE8E0;
+  --text-secondary: #9D968C;
+  --text-muted: #6B6560;
+  --accent: #C89B6E;
+  --accent-hover: #D4AC82;
+  --accent-dim: #8B6F52;
+  --accent-glow: rgba(200, 155, 110, 0.12);
+  --error: #D97171;
+  --error-bg: rgba(217, 113, 113, 0.1);
+  --font-display: 'DM Serif Display', 'Times New Roman', serif;
+  --font-body: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', monospace;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  --color-background: var(--bg-root);
+  --color-foreground: var(--text-primary);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-    "Microsoft YaHei", sans-serif;
+  background: var(--bg-root);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-/* Scrollbar */
-::-webkit-scrollbar {
-  width: 6px;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
+/* Scrollbar — refined thin */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: #333;
-  border-radius: 3px;
+  background: var(--border-default);
+  border-radius: 2px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #555;
+  background: var(--text-muted);
+}
+
+/* Selection */
+::selection {
+  background: rgba(200, 155, 110, 0.25);
+  color: var(--text-primary);
+}
+
+/* Focus ring — subtle amber */
+*:focus-visible {
+  outline: 1.5px solid var(--accent-dim);
+  outline-offset: 2px;
+}
+
+/* Staggered enter animation */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.animate-enter {
+  animation: fadeUp 0.5s ease-out both;
 }

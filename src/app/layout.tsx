@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "AI PM Agent — 产品经理智能工作台",
-  description: "内置 12 个 AI PM 专业技能的智能助手，覆盖产品决策链、求职链路和知识管理",
+  description: "AI 产品经理专业工作台，覆盖产品决策全链路的智能助手",
 };
 
 export default function RootLayout({
