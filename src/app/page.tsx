@@ -313,6 +313,18 @@ export default function Home() {
               const isAssistantStreaming =
                 message.role === "assistant" && isStreaming(message);
 
+              // Debug: log message structure for assistant messages
+              if (message.role === "assistant") {
+                console.log("[DEBUG] Assistant message:", {
+                  id: message.id,
+                  role: message.role,
+                  partsCount: message.parts?.length,
+                  parts: message.parts?.map((p: any) => ({ type: p.type, textLen: p.text?.length, state: p.state })),
+                  textContent,
+                  isStreaming: isAssistantStreaming,
+                });
+              }
+
               return (
                 <div
                   key={message.id}
@@ -355,184 +367,11 @@ export default function Home() {
 
                     {/* Assistant — editorial prose */}
                     {message.role === "assistant" && (
-                      <div className="text-sm leading-relaxed" style={{ color: "var(--text-secondary)" }}>
+                      <div className="text-sm leading-relaxed" style={{ color: "#EDE8E0" }}>
                         {textContent ? (
-                          <ReactMarkdown
-                            components={{
-                              h1: ({ children }) => (
-                                <h1
-                                  className="text-xl font-bold mt-8 mb-4 pb-3"
-                                  style={{
-                                    fontFamily: "var(--font-display)",
-                                    color: "var(--text-primary)",
-                                    borderBottom: "1px solid var(--border-subtle)",
-                                  }}
-                                >
-                                  {children}
-                                </h1>
-                              ),
-                              h2: ({ children }) => (
-                                <h2
-                                  className="text-base font-semibold mt-6 mb-3"
-                                  style={{
-                                    fontFamily: "var(--font-display)",
-                                    color: "var(--text-primary)",
-                                  }}
-                                >
-                                  {children}
-                                </h2>
-                              ),
-                              h3: ({ children }) => (
-                                <h3 className="text-sm font-semibold mt-5 mb-2" style={{ color: "var(--text-primary)" }}>
-                                  {children}
-                                </h3>
-                              ),
-                              p: ({ children }) => (
-                                <p className="my-2.5 leading-relaxed">{children}</p>
-                              ),
-                              ul: ({ children }) => (
-                                <ul className="my-3 pl-5 space-y-1.5" style={{ listStyleType: 'disc' }}>
-                                  {children}
-                                </ul>
-                              ),
-                              ol: ({ children }) => (
-                                <ol className="my-3 pl-5 space-y-1.5" style={{ listStyleType: 'decimal' }}>
-                                  {children}
-                                </ol>
-                              ),
-                              li: ({ children }) => <li>{children}</li>,
-                              strong: ({ children }) => (
-                                <strong style={{ color: "var(--text-primary)", fontWeight: 600 }}>
-                                  {children}
-                                </strong>
-                              ),
-                              em: ({ children }) => (
-                                <em style={{ fontStyle: "italic", color: "var(--text-secondary)" }}>
-                                  {children}
-                                </em>
-                              ),
-                              code: ({
-                                className,
-                                children,
-                              }: {
-                                className?: string;
-                                children?: React.ReactNode;
-                              }) => {
-                                const isInline = !className;
-                                const language = className?.replace("language-", "");
-                                const codeStr = typeof children === "string" ? children : "";
-                                const isHtml = language === "html";
-
-                                if (isInline) {
-                                  return (
-                                    <code
-                                      className="px-1.5 py-0.5 rounded text-xs"
-                                      style={{
-                                        background: "var(--bg-elevated)",
-                                        color: "var(--accent)",
-                                        fontFamily: "var(--font-mono)",
-                                        fontSize: "0.8em",
-                                      }}
-                                    >
-                                      {children}
-                                    </code>
-                                  );
-                                }
-
-                                return (
-                                  <div className="relative group my-4">
-                                    {isHtml && codeStr.length > 100 && (
-                                      <button
-                                        onClick={() => openPreview(codeStr)}
-                                        className="absolute top-3 right-3 z-10 px-3 py-1.5 text-xs rounded-lg
-                                                   transition-all duration-200 flex items-center gap-1.5
-                                                   opacity-0 group-hover:opacity-100"
-                                        style={{
-                                          background: "var(--accent)",
-                                          color: "var(--bg-root)",
-                                          fontWeight: 500,
-                                        }}
-                                      >
-                                        <span>↗</span>
-                                        <span>预览原型</span>
-                                      </button>
-                                    )}
-                                    <pre
-                                      className="p-5 rounded-2xl text-xs overflow-x-auto"
-                                      style={{
-                                        background: "var(--bg-surface)",
-                                        border: "1px solid var(--border-subtle)",
-                                        color: "var(--text-secondary)",
-                                        fontFamily: "var(--font-mono)",
-                                        lineHeight: 1.65,
-                                      }}
-                                    >
-                                      <code>{children}</code>
-                                    </pre>
-                                  </div>
-                                );
-                              },
-                              table: ({ children }) => (
-                                <div
-                                  className="overflow-x-auto my-4 rounded-xl"
-                                  style={{ border: "1px solid var(--border-subtle)" }}
-                                >
-                                  <table className="min-w-full text-xs">{children}</table>
-                                </div>
-                              ),
-                              thead: ({ children }) => (
-                                <thead style={{ background: "var(--bg-surface)" }}>{children}</thead>
-                              ),
-                              th: ({ children }) => (
-                                <th
-                                  className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wider"
-                                  style={{
-                                    color: "var(--text-muted)",
-                                    borderBottom: "1px solid var(--border-subtle)",
-                                    letterSpacing: "0.05em",
-                                  }}
-                                >
-                                  {children}
-                                </th>
-                              ),
-                              td: ({ children }) => (
-                                <td
-                                  className="px-4 py-2.5"
-                                  style={{
-                                    borderBottom: "1px solid var(--border-subtle)",
-                                    color: "var(--text-secondary)",
-                                  }}
-                                >
-                                  {children}
-                                </td>
-                              ),
-                              blockquote: ({ children }) => (
-                                <blockquote
-                                  className="border-l-2 pl-5 my-4 italic text-sm"
-                                  style={{
-                                    borderColor: "var(--accent-dim)",
-                                    color: "var(--text-muted)",
-                                  }}
-                                >
-                                  {children}
-                                </blockquote>
-                              ),
-                              hr: () => (
-                                <hr className="my-6" style={{ borderColor: "var(--border-subtle)" }} />
-                              ),
-                              a: ({ href, children }) => (
-                                <a
-                                  href={href}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="underline underline-offset-2"
-                                  style={{ color: "var(--accent)", textDecorationColor: "var(--accent-dim)" }}
-                                >
-                                  {children}
-                                </a>
-                              ),
-                            }}
-                          />
+                          <div style={{color:"#EDE8E0",whiteSpace:"pre-wrap",lineHeight:1.8,fontSize:"0.95rem"}}>
+                            {textContent}
+                          </div>
                         ) : isAssistantStreaming ? (
                           <div className="flex items-center gap-2 py-3" style={{ color: "var(--text-muted)" }}>
                             <span

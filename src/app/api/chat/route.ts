@@ -1,5 +1,5 @@
-import { createOpenAI } from "@ai-sdk/openai";
-import { streamText, tool, stepCountIs } from "ai";
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { streamText, tool, stepCountIs, convertToModelMessages } from "ai";
 import { z } from "zod";
 import { BRD_SYSTEM_PROMPT, detectSkillIntent } from "@/lib/brd-prompt";
 import { MRD_SYSTEM_PROMPT } from "@/lib/mrd-prompt";
@@ -17,8 +17,9 @@ import { HUASHU_DESIGN_PROMPT } from "@/lib/huashu-design-prompt";
 
 export const maxDuration = 60;
 
-const deepseek = createOpenAI({
-  baseURL: "https://api.deepseek.com",
+const deepseek = createOpenAICompatible({
+  name: "deepseek",
+  baseURL: "https://api.deepseek.com/v1",
   apiKey: process.env.DEEPSEEK_API_KEY,
 });
 
@@ -143,10 +144,15 @@ export async function POST(req: Request) {
       ? `\n\n【当前模式】${SKILL_REGISTRY[skillIntent].intro}\n`
       : "";
 
+  console.log("[Agent] Using model: deepseek-chat");
+  console.log("[Agent] API Key present:", !!process.env.DEEPSEEK_API_KEY);
+
+  const modelMessages = await convertToModelMessages(messages);
+
   const result = streamText({
     model: deepseek("deepseek-chat"),
     system: systemPrompt + modeHint,
-    messages,
+    messages: modelMessages,
     tools,
     stopWhen: stepCountIs(10),
     temperature: 0.7,
