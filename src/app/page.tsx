@@ -1,8 +1,18 @@
 "use client";
 
 import { useChat } from "@ai-sdk/react";
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
+import Sidebar, {
+  getConversations,
+  getActiveId,
+  setActiveId,
+  createConversation,
+  updateConversation,
+  deleteConversation,
+  getConvMessages,
+  saveConvMessages,
+} from "@/components/sidebar";
 
 // ============================================================
 // Helpers
@@ -38,6 +48,7 @@ const SKILL_GROUPS = [
       { id: "brd", label: "BRD", icon: "📊" },
       { id: "mrd", label: "MRD", icon: "📋" },
       { id: "vibe_prd", label: "Vibe PRD", icon: "⚡" },
+      { id: "ai_prd", label: "正式 PRD", icon: "📝" },
     ],
   },
   {
@@ -47,37 +58,162 @@ const SKILL_GROUPS = [
     ],
   },
   {
-    label: "知识管理",
+    label: "能力建设",
+    skills: [
+      { id: "interactive_learning", label: "交互式学习", icon: "🎓" },
+      { id: "accelerated_learning", label: "48h加速学习", icon: "⏱️" },
+      { id: "product_teardown", label: "产品拆解", icon: "🔧" },
+      { id: "article_cowriter", label: "文章共创", icon: "✍️" },
+    ],
+  },
+  {
+    label: "知识沉淀",
     skills: [
       { id: "obsidian_saver", label: "知识沉淀", icon: "💾" },
-      { id: "article_cowriter", label: "文章共创", icon: "✍️" },
     ],
   },
 ];
 
-const QUICK_PROMPTS = [
-  { icon: "📊", text: "帮我评估这个方向值不值得做" },
-  { icon: "🔍", text: "帮我挖掘用户在抱怨什么" },
-  { icon: "⚡", text: "帮我把想法转成项目规范" },
-  { icon: "🎨", text: "帮我做一个AI写作App原型" },
-  { icon: "📱", text: "帮我设计一个番茄钟iOS界面" },
+const GROUPED_PROMPTS = [
+  {
+    label: "产品决策链",
+    icon: "🧭",
+    prompts: [
+      { tag: "挖掘", text: "帮我发现用户未被满足的痛点" },
+      { tag: "评估", text: "帮我写BRD，评估这个方向值不值得做" },
+      { tag: "分析", text: "帮我写MRD，分析这个赛道的市场需求" },
+      { tag: "速写", text: "帮我快速输出一份轻量级 PRD" },
+      { tag: "规范", text: "帮我写一份完整的正式 PRD 文档" },
+    ],
+  },
+  {
+    label: "产品设计",
+    icon: "🎨",
+    prompts: [
+      { tag: "原型", text: "帮我做一个AI产品的高保真原型" },
+    ],
+  },
+  {
+    label: "能力建设",
+    icon: "🚀",
+    prompts: [
+      { tag: "拆解", text: "帮我拆解一下这个AI产品" },
+      { tag: "速成", text: "我想48小时快速搞懂一个陌生领域" },
+      { tag: "深学", text: "我想系统深入地学习一个专业领域" },
+      { tag: "共创", text: "帮我写一篇有深度的行业干货文章" },
+    ],
+  },
+  {
+    label: "知识沉淀",
+    icon: "💾",
+    prompts: [
+      { tag: "沉淀", text: "帮我把今天聊的内容沉淀为知识笔记" },
+    ],
+  },
 ];
 
 // ============================================================
 // Component
 // ============================================================
 export default function Home() {
-  const { messages, sendMessage, status, error, stop } = useChat({
+  const [convId, setConvId] = useState<string | null>(null);
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setConvId(getActiveId());
+    setMounted(true);
+  }, []);
+
+  const { messages, sendMessage, status, error, stop, setMessages } = useChat({
+    messages: convId ? getConvMessages(convId) : [],
     onError: (err) => console.error("Chat error:", err),
   });
 
   const [input, setInput] = useState("");
   const [selectedSkill, setSelectedSkill] = useState<string>("auto");
-  const [previewHtml, setPreviewHtml] = useState<string | null>(null);
+  const [selectedModel, setSelectedModel] = useState<string>("deepseek-chat");
+  const [availableModels, setAvailableModels] = useState<{ id: string; name: string }[]>([]);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [modelOpen, setModelOpen] = useState(false);
+  const [previewHtml, setPreviewHtml] = useState<string | null>(null);
+  const [sidePanelHtml, setSidePanelHtml] = useState<string | null>(null);
+  const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const paletteRef = useRef<HTMLDivElement>(null);
+  const modelRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // 自动检测最新原型 HTML 并更新侧边预览
+  useEffect(() => {
+    if (status !== "ready" && status !== "error") return;
+    const lastMsg = messages[messages.length - 1];
+    if (!lastMsg || lastMsg.role !== "assistant") return;
+    const txt = getMessageText(lastMsg).trim();
+    const htmlMatch = txt.match(/```html\s*([\s\S]*?)```/i);
+    if (htmlMatch) {
+      setSidePanelHtml(htmlMatch[1]);
+    }
+  }, [messages, status]);
+
+  // 获取可用模型列表
+  useEffect(() => {
+    fetch("/api/chat").then(r => r.json()).then(d => {
+      setAvailableModels(d.models || []);
+      if (d.defaultModel) setSelectedModel(d.defaultModel);
+    }).catch(() => {});
+  }, []);
+
+  // 切换对话时立即替换消息列表
+  const switchConversation = useCallback((id: string) => {
+    setActiveId(id);
+    setConvId(id);
+    setMessages(getConvMessages(id));
+  }, [setMessages]);
+
+  // 新建对话时清空
+  const newConversation = useCallback(() => {
+    setActiveId(null);
+    setConvId(null);
+    setMessages([]);
+  }, [setMessages]);
+
+  // 删除对话
+  const handleDelete = useCallback(
+    (id: string) => {
+      deleteConversation(id);
+      if (convId === id) {
+        setActiveId(null);
+        setConvId(null);
+        setMessages([]);
+      }
+    },
+    [convId, setMessages]
+  );
+
+  // 首条消息自动创建对话标题
+  const createdRef = useRef(false);
+  useEffect(() => {
+    if (!convId && messages.length > 0) {
+      const firstUser = messages.find((m) => m.role === "user");
+      if (firstUser) {
+        const title = getMessageText(firstUser).slice(0, 30);
+        const id = createConversation(title);
+        setConvId(id);
+        createdRef.current = true;
+      }
+    }
+  }, [messages, convId]);
+
+  // 持久化到当前对话
+  useEffect(() => {
+    if (convId && status !== "streaming" && messages.length > 0) {
+      saveConvMessages(convId, messages);
+      const nonSystem = messages.filter((m) => m.role !== "system");
+      if (nonSystem.length > 0) {
+        updateConversation(convId, { lastMessageAt: new Date().toISOString() });
+      }
+    }
+  }, [messages, status, convId]);
 
   // Auto scroll
   useEffect(() => {
@@ -91,15 +227,73 @@ export default function Home() {
         setPaletteOpen(false);
       }
     }
-    if (paletteOpen) document.addEventListener("mousedown", handleClick);
+    if (paletteOpen || modelOpen) document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
-  }, [paletteOpen]);
+  }, [paletteOpen, modelOpen]);
+
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (modelRef.current && !modelRef.current.contains(e.target as Node)) {
+        setModelOpen(false);
+      }
+    }
+    if (modelOpen) document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [modelOpen]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || status === "streaming") return;
-    sendMessage({ text: input.trim() }, { body: { skill: selectedSkill } });
+    if ((!input.trim() && attachedFiles.length === 0) || status === "streaming") return;
+    const fileList =
+      attachedFiles.length > 0
+        ? (() => {
+            const dt = new DataTransfer();
+            attachedFiles.forEach((f) => dt.items.add(f));
+            return dt.files;
+          })()
+        : undefined;
+    sendMessage(
+      { text: input.trim(), files: fileList },
+      { body: { skill: selectedSkill, model: selectedModel } }
+    );
     setInput("");
+    setAttachedFiles([]);
+  };
+
+  // 文件上传
+  const handleFileAdd = (files: FileList | File[]) => {
+    setAttachedFiles((prev) => [...prev, ...Array.from(files)].slice(0, 5));
+  };
+  const handleFileRemove = (i: number) => {
+    setAttachedFiles((prev) => prev.filter((_, idx) => idx !== i));
+  };
+
+  // 粘贴图片
+  useEffect(() => {
+    const handler = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const imageFiles: File[] = [];
+      for (const item of items) {
+        if (item.type.startsWith("image/")) {
+          const file = item.getAsFile();
+          if (file) imageFiles.push(file);
+        }
+      }
+      if (imageFiles.length > 0) {
+        setAttachedFiles((prev) => [...prev, ...imageFiles].slice(0, 5));
+      }
+    };
+    document.addEventListener("paste", handler);
+    return () => document.removeEventListener("paste", handler);
+  }, []);
+
+  // 拖拽文件
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    if (e.dataTransfer.files.length > 0) {
+      handleFileAdd(e.dataTransfer.files);
+    }
   };
 
   const selectSkill = (id: string) => {
@@ -121,9 +315,19 @@ export default function Home() {
 
   return (
     <div
-      className="flex flex-col h-screen"
+      className="flex h-screen"
       style={{ background: "var(--bg-root)", color: "var(--text-primary)", fontFamily: "var(--font-body)" }}
     >
+      {/* Sidebar */}
+      <Sidebar
+        activeId={convId}
+        onSelect={switchConversation}
+        onNew={newConversation}
+        onDelete={handleDelete}
+      />
+
+      {/* Main area */}
+      <div className="flex-1 flex flex-col min-w-0">
       {/* ================================================================ */}
       {/* Masthead */}
       {/* ================================================================ */}
@@ -169,7 +373,7 @@ export default function Home() {
             {/* Dropdown palette */}
             {paletteOpen && (
               <div
-                className="absolute right-0 top-full mt-2 w-72 rounded-2xl py-3 px-2 z-50 shadow-2xl animate-enter"
+                className="absolute -right-2 top-full mt-2 w-64 rounded-2xl py-3 px-2 z-50 shadow-2xl animate-enter"
                 style={{
                   background: "var(--bg-surface)",
                   border: "1px solid var(--border-default)",
@@ -221,6 +425,53 @@ export default function Home() {
             )}
           </div>
 
+          {/* Model selector */}
+          {availableModels.length > 0 && (
+            <div className="relative" ref={modelRef}>
+              <button
+                onClick={() => setModelOpen(!modelOpen)}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-full transition-all duration-200"
+                style={{
+                  background: "var(--bg-elevated)",
+                  border: "1px solid var(--border-default)",
+                  color: "var(--text-secondary)",
+                }}
+              >
+                {availableModels.find(m => m.id === selectedModel)?.name || "模型"}
+                <svg width="8" height="5" viewBox="0 0 10 6" fill="none">
+                  <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+              {modelOpen && (
+                <div
+                  className="absolute -right-2 top-full mt-2 w-40 rounded-xl py-2 px-1 z-50 shadow-2xl animate-enter"
+                  style={{
+                    background: "var(--bg-surface)",
+                    border: "1px solid var(--border-default)",
+                    boxShadow: "0 24px 48px -12px rgba(0,0,0,0.6)",
+                  }}
+                >
+                  {availableModels.map((m) => (
+                    <button
+                      key={m.id}
+                      onClick={() => { setSelectedModel(m.id); setModelOpen(false); }}
+                      className="w-full text-left px-3 py-2 rounded-xl text-xs transition-colors"
+                      style={{
+                        background: selectedModel === m.id ? "var(--accent-glow)" : "transparent",
+                        color: selectedModel === m.id ? "var(--accent)" : "var(--text-secondary)",
+                      }}
+                    >
+                      {m.name}
+                      {selectedModel === m.id && (
+                        <span className="float-right text-xs" style={{ color: "var(--accent)" }}>✓</span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Status */}
           <div className="flex items-center gap-2 text-xs select-none" style={{ color: "var(--text-muted)" }}>
             <span
@@ -241,6 +492,24 @@ export default function Home() {
             />
             {status === "streaming" ? "回复中" : "就绪"}
           </div>
+
+          {/* Header actions */}
+          <div className="flex items-center gap-2">
+            {messages.length > 0 && (
+              <button
+                onClick={newConversation}
+                className="px-3 py-1.5 rounded-full text-xs font-medium flex items-center gap-1.5 transition-all duration-200 hover:opacity-80"
+                style={{
+                  background: "var(--bg-elevated)",
+                  border: "1px solid var(--border-default)",
+                  color: "var(--text-secondary)",
+                }}
+              >
+                <span>＋</span>
+                新建对话
+              </button>
+            )}
+          </div>
         </div>
       </header>
 
@@ -251,54 +520,92 @@ export default function Home() {
         <div className="max-w-3xl mx-auto space-y-8">
           {/* Empty state — editorial cover */}
           {messages.length === 0 && (
-            <div className="text-center py-20 animate-enter">
-              <div
-                className="text-6xl mb-8 select-none"
-                style={{ fontFamily: "var(--font-display)", color: "var(--text-primary)" }}
-              >
-                AI PM Agent
+            <div className="py-16 animate-enter">
+              {/* Hero */}
+              <div className="text-center mb-12">
+                <div
+                  className="text-5xl mb-4 select-none tracking-tight"
+                  style={{ fontFamily: "var(--font-display)", color: "var(--text-primary)" }}
+                >
+                  AI PM Agent
+                </div>
+                <p
+                  className="max-w-lg mx-auto leading-relaxed text-sm whitespace-nowrap"
+                  style={{ color: "var(--text-muted)" }}
+                >
+                  覆盖产品决策、产品设计、能力建设、知识沉淀四大模块，内置 11 个 AI PM 专业技能。
+                </p>
+                <p
+                  className="mt-2 text-xs"
+                  style={{ color: "var(--text-muted)" }}
+                >
+                  点击下方卡片快速体验 ↓
+                </p>
               </div>
-              <p
-                className="mb-10 max-w-md mx-auto leading-relaxed text-sm"
-                style={{ color: "var(--text-secondary)" }}
-              >
-                从商业判断到需求分析到原型设计，内置多个 AI PM 专业技能。
-                <br />
-                直接说你想做的事，Agent 会自动匹配对应的 Skill。
-              </p>
 
-              {/* Quick prompts — editorial cards */}
-              <div className="grid grid-cols-1 gap-2 max-w-lg mx-auto">
-                {QUICK_PROMPTS.map((item, i) => (
-                  <button
-                    key={i}
-                    onClick={() => fillQuickPrompt(item.text)}
-                    className="text-left w-full px-5 py-3 rounded-xl transition-all duration-200 group"
-                    style={{
-                      background: "var(--bg-surface)",
-                      border: "1px solid var(--border-subtle)",
-                      animationDelay: `${i * 60}ms`,
-                    }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.borderColor = "var(--border-default)";
-                      e.currentTarget.style.background = "var(--bg-elevated)";
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.borderColor = "var(--border-subtle)";
-                      e.currentTarget.style.background = "var(--bg-surface)";
-                    }}
-                  >
-                    <span className="text-sm flex items-center gap-3">
-                      <span className="text-base">{item.icon}</span>
-                      <span style={{ color: "var(--text-secondary)" }}>{item.text}</span>
+              {/* Grouped quick prompts */}
+              <div className="max-w-4xl mx-auto space-y-8">
+                {GROUPED_PROMPTS.map((group) => (
+                  <div key={group.label}>
+                    {/* Group header */}
+                    <div className="flex items-center gap-2.5 mb-4 px-1">
+                      <span className="text-lg">{group.icon}</span>
                       <span
-                        className="ml-auto opacity-0 group-hover:opacity-100 transition-opacity text-xs"
-                        style={{ color: "var(--accent-dim)" }}
+                        className="text-sm font-semibold select-none"
+                        style={{ color: "var(--text-primary)" }}
                       >
-                        ↵
+                        {group.label}
                       </span>
-                    </span>
-                  </button>
+                      <div className="flex-1 ml-2" style={{ height: 1, background: "var(--border-subtle)" }} />
+                    </div>
+                    {/* Prompt cards */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {group.prompts.map((item, i) => (
+                        <button
+                          key={i}
+                          onClick={() => fillQuickPrompt(item.text)}
+                          className="text-left w-full px-4 py-2.5 rounded-xl transition-all duration-200 group"
+                          style={{
+                            background: "var(--bg-surface)",
+                            border: "1px solid var(--border-subtle)",
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.borderColor = "var(--accent-dim)";
+                            e.currentTarget.style.background = "var(--bg-elevated)";
+                            e.currentTarget.style.transform = "translateY(-1px)";
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.borderColor = "var(--border-subtle)";
+                            e.currentTarget.style.background = "var(--bg-surface)";
+                            e.currentTarget.style.transform = "translateY(0)";
+                          }}
+                        >
+                          <span className="text-sm flex items-center gap-2.5">
+                            <span
+                              className="flex-none text-[0.65rem] px-2 py-0.5 rounded-md font-medium select-none"
+                              style={{
+                                background: "var(--accent-glow)",
+                                color: "var(--accent)",
+                              }}
+                            >
+                              {item.tag}
+                            </span>
+                            <span
+                              style={{ color: "var(--text-secondary)" }}
+                            >
+                              {item.text}
+                            </span>
+                            <span
+                              className="flex-none opacity-0 group-hover:opacity-100 transition-opacity text-xs ml-auto"
+                              style={{ color: "var(--accent-dim)" }}
+                            >
+                              ↵
+                            </span>
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 ))}
               </div>
             </div>
@@ -369,9 +676,116 @@ export default function Home() {
                     {message.role === "assistant" && (
                       <div className="text-sm leading-relaxed" style={{ color: "#EDE8E0" }}>
                         {textContent ? (
-                          <div style={{color:"#EDE8E0",whiteSpace:"pre-wrap",lineHeight:1.8,fontSize:"0.95rem"}}>
-                            {textContent}
-                          </div>
+                          <>
+                            {/* 检测是否包含 HTML 原型代码 */}
+                            {(() => {
+                              const txt = textContent.trim();
+                              const htmlBlock = txt.match(/```html\s*([\s\S]*?)```/i);
+                              const isHtml = htmlBlock || /<!DOCTYPE html>/i.test(txt);
+                              if (isHtml && !isAssistantStreaming) {
+                                const htm = htmlBlock?.[1] || txt;
+                                // 提取非代码部分（原型说明文字）
+                                const beforeCode = txt.replace(/```html[\s\S]*?```/i, "").trim();
+                                const now = new Date();
+                                const ds = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,"0")}${String(now.getDate()).padStart(2,"0")}`;
+                                return (
+                                  <div>
+                                    {beforeCode && (
+                                      <div style={{color:"#EDE8E0",whiteSpace:"pre-wrap",lineHeight:1.8,fontSize:"0.95rem",marginBottom:12}}>
+                                        {beforeCode}
+                                      </div>
+                                    )}
+                                    <div
+                                      className="rounded-2xl p-6 text-center"
+                                      style={{ background: "var(--bg-surface)", border: "1px solid var(--border-subtle)" }}
+                                    >
+                                      <div className="text-4xl mb-3">🎨</div>
+                                      <div className="text-sm font-semibold mb-1" style={{ color: "var(--text-primary)" }}>
+                                        产品原型已生成
+                                      </div>
+                                      <div className="text-xs mb-4" style={{ color: "var(--text-muted)" }}>
+                                        可在下方预览交互效果或下载 HTML 文件
+                                      </div>
+                                      <div className="flex gap-2 justify-center">
+                                        <button
+                                          onClick={() => openPreview(htm)}
+                                          className="px-4 py-2 rounded-xl text-sm font-medium flex items-center gap-2 transition-all duration-200 hover:opacity-90"
+                                          style={{ background: "#4A9E6B", color: "#fff" }}
+                                        >
+                                          <span>🔍</span> 预览原型
+                                        </button>
+                                        <button
+                                          onClick={() => {
+                                            const blob = new Blob([htm], { type: "text/html;charset=utf-8" });
+                                            const url = URL.createObjectURL(blob);
+                                            const a = document.createElement("a");
+                                            a.href = url;
+                                            a.download = `prototype_${ds}.html`;
+                                            a.click();
+                                            URL.revokeObjectURL(url);
+                                          }}
+                                          className="px-4 py-2 rounded-xl text-sm font-medium flex items-center gap-2 transition-all duration-200 hover:opacity-90"
+                                          style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-default)", color: "var(--text-secondary)" }}
+                                        >
+                                          <span>📥</span> 下载代码
+                                        </button>
+                                      </div>
+                                    </div>
+                                  </div>
+                                );
+                              }
+                              // 不是 HTML — 正常显示
+                              return (
+                                <div style={{color:"#EDE8E0",whiteSpace:"pre-wrap",lineHeight:1.8,fontSize:"0.95rem"}}>
+                                  {isHtml && isAssistantStreaming ? (
+                                    <div className="flex items-center gap-2 py-3" style={{ color: "var(--text-muted)" }}>
+                                      <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: "var(--accent-dim)" }} />
+                                      正在生成原型...
+                                    </div>
+                                  ) : (
+                                    textContent
+                                  )}
+                                </div>
+                              );
+                            })()}
+                            {/* Per-message download — show for substantial markdown docs */}
+                            {(() => {
+                              if (isAssistantStreaming) return null;
+                              const txt = textContent.trim();
+                              const hasHtml = /```html/i.test(txt);
+                              if (hasHtml) return null; // HTML 消息已有下载按钮
+                              const isDoc = txt.length > 200 && /^#{1,3}\s/m.test(txt);
+                              if (!isDoc) return null;
+                              const heading = txt.match(/^#\s+(.+)/m);
+                              const fname = heading
+                                ? heading[1].replace(/[\\/:*?"<>|]/g, "").slice(0, 40)
+                                : `文档片段`;
+                              const now = new Date();
+                              const ds = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,"0")}${String(now.getDate()).padStart(2,"0")}`;
+                              return (
+                                <button
+                                  onClick={() => {
+                                    const blob = new Blob([txt], { type: "text/markdown;charset=utf-8" });
+                                    const url = URL.createObjectURL(blob);
+                                    const a = document.createElement("a");
+                                    a.href = url;
+                                    a.download = `${fname}_${ds}.md`;
+                                    a.click();
+                                    URL.revokeObjectURL(url);
+                                  }}
+                                  className="mt-2 px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 transition-all duration-200 hover:opacity-80"
+                                  style={{
+                                    background: "var(--accent)",
+                                    color: "#fff",
+                                    display: "inline-flex",
+                                  }}
+                                >
+                                  <span>📥</span>
+                                  下载此文档
+                                </button>
+                              );
+                            })()}
+                          </>
                         ) : isAssistantStreaming ? (
                           <div className="flex items-center gap-2 py-3" style={{ color: "var(--text-muted)" }}>
                             <span
@@ -384,33 +798,65 @@ export default function Home() {
 
                         {/* Tool indicators */}
                         {tools.length > 0 && (
-                          <div className="mt-4 space-y-1">
-                            {tools.map((tool, i) => (
-                              <div
-                                key={`${message.id}-tool-${i}`}
-                                className="px-3 py-1.5 rounded-lg text-xs flex items-center gap-2"
-                                style={{
-                                  background: "var(--bg-surface)",
-                                  border: "1px solid var(--border-subtle)",
-                                  color: "var(--text-muted)",
-                                }}
-                              >
-                                <span>
-                                  {tool.type === "tool-approval-request"
-                                    ? "🔧"
-                                    : tool.type === "tool-result"
-                                    ? "✓"
-                                    : "⚙"}
-                                </span>
-                                <span>
-                                  {tool.type === "tool-approval-request"
-                                    ? "请求工具"
-                                    : tool.type === "tool-result"
-                                    ? "执行完成"
-                                    : "工具调用"}
-                                </span>
-                              </div>
-                            ))}
+                          <div className="mt-4 space-y-2">
+                            {tools.map((tool, i) => {
+                              const toolResult = (tool as any).result || (tool as any).output;
+                              const isDocResult =
+                                toolResult &&
+                                toolResult.filename &&
+                                toolResult.content;
+
+                              return (
+                                <div key={`${message.id}-tool-${i}`}>
+                                  <div
+                                    className="px-3 py-1.5 rounded-lg text-xs flex items-center gap-2"
+                                    style={{
+                                      background: "var(--bg-surface)",
+                                      border: "1px solid var(--border-subtle)",
+                                      color: "var(--text-muted)",
+                                    }}
+                                  >
+                                    <span>
+                                      {tool.type === "tool-approval-request"
+                                        ? "🔧"
+                                        : tool.type === "tool-result"
+                                        ? "✓"
+                                        : "⚙"}
+                                    </span>
+                                    <span>
+                                      {tool.type === "tool-approval-request"
+                                        ? "请求工具"
+                                        : isDocResult
+                                        ? `文档已生成: ${toolResult.filename}`
+                                        : tool.type === "tool-result"
+                                        ? "执行完成"
+                                        : "工具调用"}
+                                    </span>
+                                  </div>
+                                  {isDocResult && (
+                                    <button
+                                      onClick={() => {
+                                        const blob = new Blob([toolResult.content], { type: "text/markdown;charset=utf-8" });
+                                        const url = URL.createObjectURL(blob);
+                                        const a = document.createElement("a");
+                                        a.href = url;
+                                        a.download = toolResult.filename;
+                                        a.click();
+                                        URL.revokeObjectURL(url);
+                                      }}
+                                      className="mt-1.5 w-full px-3 py-2 rounded-xl text-sm font-medium flex items-center justify-center gap-2 transition-all duration-200 hover:opacity-90"
+                                      style={{
+                                        background: "var(--accent)",
+                                        color: "#fff",
+                                      }}
+                                    >
+                                      <span>📥</span>
+                                      下载 {toolResult.filename}
+                                    </button>
+                                  )}
+                                </div>
+                              );
+                            })}
                           </div>
                         )}
                       </div>
@@ -464,41 +910,93 @@ export default function Home() {
       >
         <div className="max-w-3xl mx-auto">
           <form onSubmit={handleSubmit} className="flex gap-3 items-end">
-            <div className="flex-1 relative">
-              <textarea
-                ref={textareaRef}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder="说说你想做的事，Agent 会自动匹配对应的 Skill..."
-                rows={2}
-                className="w-full rounded-2xl px-5 py-3 text-sm resize-none transition-all duration-200"
-                style={{
-                  background: "var(--bg-surface)",
-                  border: "1px solid var(--border-default)",
-                  color: "var(--text-primary)",
-                  fontFamily: "var(--font-body)",
-                  outline: "none",
-                }}
-                onFocus={(e) => {
-                  e.currentTarget.style.borderColor = "var(--accent-dim)";
-                  e.currentTarget.style.boxShadow = "0 0 0 3px var(--accent-glow)";
-                }}
-                onBlur={(e) => {
-                  e.currentTarget.style.borderColor = "var(--border-default)";
-                  e.currentTarget.style.boxShadow = "none";
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSubmit(e as unknown as React.FormEvent);
-                  }
-                }}
-              />
+            <div className="flex-1 relative" onDrop={handleDrop} onDragOver={(e) => e.preventDefault()}>
+              {/* File previews */}
+              {attachedFiles.length > 0 && (
+                <div className="flex gap-2 mb-2 flex-wrap">
+                  {attachedFiles.map((file, i) => (
+                    <div
+                      key={i}
+                      className="relative group rounded-lg overflow-hidden flex-none"
+                      style={{ width: 48, height: 48, background: "var(--bg-elevated)", border: "1px solid var(--border-subtle)" }}
+                    >
+                      {file.type.startsWith("image/") ? (
+                        <img src={URL.createObjectURL(file)} alt="" className="w-full h-full object-cover" />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center text-xs" style={{ color: "var(--text-muted)" }}>
+                          📄
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleFileRemove(i)}
+                        className="absolute top-0 right-0 w-4 h-4 flex items-center justify-center text-[0.5rem] rounded-bl opacity-0 group-hover:opacity-100 transition-opacity"
+                        style={{ background: "rgba(0,0,0,0.6)", color: "#fff" }}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {/* Input row */}
+              <div className="flex gap-2 items-end">
+                {/* + button */}
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="flex-none w-9 h-9 rounded-xl flex items-center justify-center text-lg transition-all duration-200 hover:opacity-80"
+                  style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-default)", color: "var(--text-muted)" }}
+                  title="上传文件或图片"
+                >
+                  +
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*,.pdf,.md,.txt,.csv,.json,.doc,.docx"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => {
+                    if (e.target.files) handleFileAdd(e.target.files);
+                    e.target.value = "";
+                  }}
+                />
+                <textarea
+                  ref={textareaRef}
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  placeholder="描述你想做的事，也可以拖拽或粘贴文件到这里"
+                  rows={2}
+                  className="flex-1 rounded-2xl px-4 py-3 text-sm resize-none transition-all duration-200 placeholder:text-sm"
+                  style={{
+                    background: "var(--bg-surface)",
+                    border: "1px solid var(--border-default)",
+                    color: "var(--text-primary)",
+                    fontFamily: "var(--font-body)",
+                    outline: "none",
+                  }}
+                  onFocus={(e) => {
+                    e.currentTarget.style.borderColor = "var(--accent-dim)";
+                    e.currentTarget.style.boxShadow = "0 0 0 3px var(--accent-glow)";
+                  }}
+                  onBlur={(e) => {
+                    e.currentTarget.style.borderColor = "var(--border-default)";
+                    e.currentTarget.style.boxShadow = "none";
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSubmit(e as unknown as React.FormEvent);
+                    }
+                  }}
+                />
+              </div>
               <div
-                className="absolute bottom-2.5 right-4 text-xs select-none"
+                className="absolute bottom-2 right-14 text-xs select-none"
                 style={{ color: "var(--text-muted)", fontSize: "0.65rem" }}
               >
-                Enter 发送 · Shift+Enter 换行
+                Enter 发送 · 贴图/拖拽上传
               </div>
             </div>
 
@@ -533,8 +1031,62 @@ export default function Home() {
           </form>
         </div>
       </footer>
+      </div>{/* end main area */}
 
-      {/* ================================================================ */}
+      {/* Side Preview Panel */}
+      {sidePanelHtml && (
+        <div
+          className="flex-none flex flex-col"
+          style={{
+            width: 420,
+            background: "#fff",
+            borderLeft: "1px solid var(--border-subtle)",
+          }}
+        >
+          <div
+            className="flex items-center justify-between px-4 py-2 flex-none"
+            style={{ background: "#FAFAF8", borderBottom: "1px solid #EBE8E3" }}
+          >
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full" style={{ background: "#7CB886" }} />
+              <span className="text-xs font-medium" style={{ color: "#6B6560" }}>原型预览</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  const blob = new Blob([sidePanelHtml], { type: "text/html;charset=utf-8" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  const now = new Date();
+                  const ds = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,"0")}${String(now.getDate()).padStart(2,"0")}`;
+                  a.download = `prototype_${ds}.html`;
+                  a.click();
+                  URL.revokeObjectURL(url);
+                }}
+                className="px-2 py-1 text-xs rounded-md transition-colors hover:opacity-80"
+                style={{ background: "var(--accent)", color: "#fff" }}
+              >
+                📥 下载
+              </button>
+              <button
+                onClick={() => setSidePanelHtml(null)}
+                className="text-xs px-2 py-1 rounded-md transition-colors"
+                style={{ background: "#F0EDE8", color: "#6B6560" }}
+              >
+                ✕ 关闭
+              </button>
+            </div>
+          </div>
+          <iframe
+            srcDoc={sidePanelHtml}
+            className="flex-1 w-full border-0"
+            sandbox="allow-scripts allow-same-origin allow-forms"
+            title="原型实时预览"
+          />
+        </div>
+      )}
+
       {/* Prototype Preview Modal — warm edition */}
       {/* ================================================================ */}
       {previewHtml && (

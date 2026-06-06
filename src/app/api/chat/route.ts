@@ -1,4 +1,6 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { createAnthropic } from "@ai-sdk/anthropic";
+import { createOpenAI } from "@ai-sdk/openai";
 import { streamText, tool, stepCountIs, convertToModelMessages } from "ai";
 import { z } from "zod";
 import { BRD_SYSTEM_PROMPT, detectSkillIntent } from "@/lib/brd-prompt";
@@ -14,14 +16,48 @@ import {
   AI_AGENT_PRD_WRITER_PROMPT,
 } from "@/lib/product-chain-prompt";
 import { HUASHU_DESIGN_PROMPT } from "@/lib/huashu-design-prompt";
+import { PRODUCT_TEARDOWN_PROMPT } from "@/lib/product-teardown-prompt";
+import { ACCELERATED_LEARNING_PROMPT } from "@/lib/accelerated-learning-prompt";
 
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 const deepseek = createOpenAICompatible({
   name: "deepseek",
   baseURL: "https://api.deepseek.com/v1",
   apiKey: process.env.DEEPSEEK_API_KEY,
 });
+
+// 模型注册表 — 动态展示已配置 key 的模型
+const MODEL_REGISTRY: Record<string, { name: string; getModel: () => any }> = {};
+
+if (process.env.DEEPSEEK_API_KEY) {
+  MODEL_REGISTRY["deepseek-chat"] = {
+    name: "DeepSeek",
+    getModel: () => deepseek("deepseek-chat"),
+  };
+}
+
+if (process.env.ANTHROPIC_API_KEY) {
+  const anthropic = createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  MODEL_REGISTRY["claude-sonnet-4-6"] = {
+    name: "Claude Sonnet",
+    getModel: () => anthropic("claude-sonnet-4-6"),
+  };
+  MODEL_REGISTRY["claude-haiku-4-5"] = {
+    name: "Claude Haiku",
+    getModel: () => anthropic("claude-haiku-4-5"),
+  };
+}
+
+if (process.env.OPENAI_API_KEY) {
+  const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  MODEL_REGISTRY["gpt-4o"] = {
+    name: "GPT-4o",
+    getModel: () => openai("gpt-4o"),
+  };
+}
+
+const DEFAULT_MODEL = Object.keys(MODEL_REGISTRY)[0] || "deepseek-chat";
 
 // ============================================================
 // Skill 注册表
@@ -66,26 +102,49 @@ const SKILL_REGISTRY: Record<string, { prompt: string; intro: string }> = {
     prompt: HUASHU_DESIGN_PROMPT,
     intro: "🎨 **花叔原型设计** — 用 HTML 做高保真产品原型、交互 Demo、App mockup",
   },
+  // 产品拆解
+  product_teardown: {
+    prompt: PRODUCT_TEARDOWN_PROMPT,
+    intro: "🔧 **产品拆解** — 六层逆向工程，系统性拆解AI产品的完整架构",
+  },
+  // 48h加速学习
+  accelerated_learning: {
+    prompt: ACCELERATED_LEARNING_PROMPT,
+    intro: "⏱️ **48h加速学习** — 三个关键问题快速建立领域认知全景图，达到能与专家对话",
+  },
 };
 
 // ============================================================
 // 路由逻辑
 // ============================================================
+// 通用 PM Agent prompt — 未匹配到具体 Skill 时的默认身份
+const GENERAL_PM_PROMPT = `你是 AI PM Agent，一个全能型产品经理助手。你拥有以下专业技能，根据用户需求自动匹配：
+
+**产品决策链**：灵感挖掘 🔍 / BRD 📊 / MRD 📋 / Vibe PRD ⚡ / 正式 PRD 📝
+**产品设计**：原型设计 🎨
+**能力建设**：交互式学习 🎓 / 48h加速学习 ⏱️ / 产品拆解 🔧 / 文章共创 ✍️
+**知识沉淀**：知识沉淀 💾
+
+当用户的需求明确匹配某个技能时，直接以该技能的身份工作。如果用户需求不明确，简要介绍你能做什么，引导用户说清需求。`;
+
 function getSystemPrompt(skillIntent: string | null): string {
   if (skillIntent && SKILL_REGISTRY[skillIntent]) {
     return SKILL_REGISTRY[skillIntent].prompt;
   }
-  return BRD_SYSTEM_PROMPT;
+  return GENERAL_PM_PROMPT;
 }
 
 function getSkillTools() {
+  const tavilyKey = process.env.TAVILY_API_KEY;
+
   return {
     searchWeb: tool({
-      description: "搜索互联网获取信息。",
+      description: "搜索互联网获取信息，返回标题、摘要、链接。",
       inputSchema: z.object({
         query: z.string().describe("搜索关键词"),
         platform: z
           .enum(["general", "reddit", "zhihu", "twitter"])
+          .optional()
           .describe("限定搜索平台"),
       }),
       execute: async ({ query, platform }) => {
@@ -95,12 +154,38 @@ function getSkillTools() {
         else if (platform === "twitter") searchQuery = `site:x.com ${query}`;
 
         console.log(`[Agent] Searching: ${searchQuery}`);
-        return {
-          query: searchQuery,
-          platform,
-          note: "搜索功能需要配置搜索 API。可手动搜索后将结果粘贴到对话中。",
-          suggestedQueries: [`${query}`, `${query} site:reddit.com`],
-        };
+
+        if (!tavilyKey) {
+          return { query: searchQuery, note: "搜索 API 未配置，请设置 TAVILY_API_KEY。" };
+        }
+
+        try {
+          const res = await fetch("https://api.tavily.com/search", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              api_key: tavilyKey,
+              query: searchQuery,
+              search_depth: "basic",
+              max_results: 5,
+              include_domains: platform === "zhihu" ? ["zhihu.com"] : undefined,
+            }),
+          });
+          const data = await res.json();
+          console.log(`[Agent] Search done: ${data.results?.length || 0} results`);
+
+          return {
+            query: searchQuery,
+            results: data.results?.map((r: any) => ({
+              title: r.title,
+              url: r.url,
+              content: r.content,
+            })) || [],
+          };
+        } catch (err) {
+          console.error("[Agent] Search error:", err);
+          return { query: searchQuery, error: "搜索请求失败，请稍后重试" };
+        }
       },
     }),
 
@@ -112,14 +197,51 @@ function getSkillTools() {
       }),
       execute: async ({ url, reason }) => {
         console.log(`[Agent] Fetching: ${url}`);
-        return { url, reason, note: "建议手动访问该链接并粘贴相关内容到对话中。" };
+
+        if (!tavilyKey) {
+          return { url, reason, note: "网页抓取 API 未配置，请手动访问。" };
+        }
+
+        try {
+          const res = await fetch("https://api.tavily.com/extract", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ api_key: tavilyKey, urls: [url] }),
+          });
+          const data = await res.json();
+          const content = data.results?.[0]?.raw_content || data.results?.[0]?.content || "";
+          console.log(`[Agent] Extract done: ${content.length} chars`);
+
+          return { url, reason, content };
+        } catch (err) {
+          console.error("[Agent] Extract error:", err);
+          return { url, reason, error: "网页抓取失败，请稍后重试" };
+        }
+      },
+    }),
+
+    saveDocument: tool({
+      description: "将产出的完整文档保存为可下载的 Markdown 文件。当你生成BRD、MRD、PRD、拆解报告、学习笔记、文章、知识沉淀等完整文档时，调用此工具让用户下载。",
+      inputSchema: z.object({
+        filename: z.string().describe("文件名，如 PRD_智能写作助手_20260606.md"),
+        content: z.string().describe("完整的 Markdown 格式文档内容"),
+      }),
+      execute: async ({ filename, content }) => {
+        console.log(`[Agent] saveDocument: ${filename} (${content.length} chars)`);
+        return { filename, content };
       },
     }),
   };
 }
 
 export async function POST(req: Request) {
-  const { messages, skill: manualSkill } = await req.json();
+  const { messages, skill: manualSkill, model: selectedModel } = await req.json();
+
+  // 选择模型
+  const modelKey = selectedModel && MODEL_REGISTRY[selectedModel]
+    ? selectedModel
+    : DEFAULT_MODEL;
+  const modelProvider = MODEL_REGISTRY[modelKey]?.getModel() || deepseek("deepseek-chat");
 
   const userMessages = messages.filter(
     (m: { role: string }) => m.role === "user"
@@ -135,28 +257,145 @@ export async function POST(req: Request) {
   const systemPrompt = getSystemPrompt(skillIntent);
   const tools = getSkillTools();
 
+  // 检测原型迭代：对话中已有 HTML 原型 → 用轻量迭代 prompt 加速
+  const hasExistingPrototype = messages.some((m: any) => {
+    if (m.role !== "assistant") return false;
+    const text = m.parts?.filter((p: any) => p.type === "text").map((p: any) => p.text || "").join("") || "";
+    return /```html/i.test(text) || /<!DOCTYPE html>/i.test(text);
+  });
+  // 迭代场景判断：对话已有原型 && (用户选中了原型设计 || 没命中任何 skill → 大概率是迭代)
+  const isPrototypeIteration = hasExistingPrototype && (
+    skillIntent === "huashu_design" ||
+    manualSkill === "huashu_design" ||
+    !skillIntent
+  );
+
   if (skillIntent) {
-    console.log(`[Agent] Skill: ${skillIntent}`);
+    console.log(`[Agent] Skill: ${skillIntent}${isPrototypeIteration ? " (iteration mode → short prompt)" : ""}`);
   }
 
-  const modeHint =
-    skillIntent && SKILL_REGISTRY[skillIntent]
-      ? `\n\n【当前模式】${SKILL_REGISTRY[skillIntent].intro}\n`
-      : "";
+  // 迭代场景用极短 prompt（省 150 行 → 模型处理速度显著提升）
+  const ITERATION_PROMPT = `你是一位原型设计师。现在用户要对已有原型做修改。
 
-  console.log("[Agent] Using model: deepseek-chat");
-  console.log("[Agent] API Key present:", !!process.env.DEEPSEEK_API_KEY);
+## 必须遵守
+1. 从对话历史中找到**最新一条包含 HTML 代码的消息**，提取完整 HTML
+2. **在它的基础上只做用户要求的修改**，其他部分一丝不变
+3. 输出完整 HTML，**必须**用 \`\`\`html ... \`\`\` 包裹（小写 html，不要大写）
+4. 不要重新设计、不要加新功能、不要改风格——除非用户明确要求
 
-  const modelMessages = await convertToModelMessages(messages);
+## 禁止
+- ❌ 重新设计整个页面
+- ❌ 添加用户没要求的功能
+- ❌ 修改用户没提到的部分`;
 
-  const result = streamText({
-    model: deepseek("deepseek-chat"),
-    system: systemPrompt + modeHint,
-    messages: modelMessages,
-    tools,
-    stopWhen: stepCountIs(10),
-    temperature: 0.7,
+  const effectiveSystemPrompt = isPrototypeIteration ? ITERATION_PROMPT : systemPrompt;
+
+  const modeHint = skillIntent && SKILL_REGISTRY[skillIntent]
+    ? `\n\n【当前模式】${SKILL_REGISTRY[skillIntent].intro}${isPrototypeIteration ? " (迭代修改)" : ""}\n`
+    : `\n\n【当前模式】🤖 通用 AI PM Agent — 自动识别用户意图，匹配合适的技能\n`;
+
+  const saveDocHint = `\n\n【文档输出规则】当你需要输出完整文档（BRD、MRD、PRD、拆解报告、学习笔记、文章、知识笔记等）时：
+1. 必须在对话中完整输出文档的全部内容，以 # 标题开头，用 Markdown 格式
+2. 不要说"文档已保存"或"已生成文件"之类的话——直接把内容展示出来
+3. 文档输出完毕后，调用 saveDocument 工具保存文件
+4. 用户会在消息下方看到下载按钮`;
+
+  console.log(`[Agent] Using model: ${modelKey}`);
+
+  // 过滤掉停止后残留的空消息，避免后续请求出错
+  const cleanMessages = messages.filter((m: any) => {
+    if (m.role === "assistant") {
+      const text = m.parts?.filter((p: any) => p.type === "text").map((p: any) => p.text || "").join("") || "";
+      return text.trim().length > 0;
+    }
+    return true;
   });
 
+  // 压缩历史消息中的 HTML 代码块，避免上下文溢出
+  // 保留最新一条 HTML 完整（迭代需要），更早的用占位符替代
+  const compressedMessages = (() => {
+    let foundLatest = false;
+    return cleanMessages.map((m: any) => {
+      if (m.role !== "assistant") return m;
+      const textParts = m.parts?.filter((p: any) => p.type === "text") || [];
+      if (textParts.length === 0) return m;
+
+      const newParts = m.parts.map((p: any) => {
+        if (p.type !== "text" || !p.text) return p;
+        // 如果文本中包含 HTML 代码块，且不是最新的一条，则压缩
+        if (/```html[\s\S]*?```/i.test(p.text)) {
+          if (!foundLatest) {
+            foundLatest = true;
+            return p; // 保留最新 HTML 完整，供迭代修改
+          }
+          // 更早的 HTML 替换为占位符
+          return {
+            ...p,
+            text: p.text.replace(/```html[\s\S]*?```/gi, '[已省略上轮原型 HTML 代码，详见历史消息]'),
+          };
+        }
+        return p;
+      });
+      return { ...m, parts: newParts };
+    });
+  })();
+
+  // 安全检查：如果压缩后消息仍然过大（估计 > 50K token），截断最早的消息
+  let safeMessages = compressedMessages;
+  const totalChars = JSON.stringify(compressedMessages).length;
+  if (totalChars > 200_000) {
+    // 保留 system prompt 级别的第一条 + 最近的 N 条
+    const keepRecent = Math.max(2, Math.floor(compressedMessages.length / 2));
+    safeMessages = [
+      compressedMessages[0],
+      ...compressedMessages.slice(-keepRecent),
+    ];
+    console.log(`[Agent] Messages trimmed: ${compressedMessages.length} → ${safeMessages.length} (${totalChars} chars total)`);
+  }
+
+  const modelMessages = await convertToModelMessages(safeMessages);
+
+  let result;
+  try {
+    result = streamText({
+      model: modelProvider,
+      system: effectiveSystemPrompt + modeHint + saveDocHint,
+      messages: modelMessages,
+      tools,
+      stopWhen: stepCountIs(10),
+      temperature: 0.7,
+    });
+  } catch (err: any) {
+    console.error("[Agent] streamText error:", err);
+    // 降级：用更短的消息重试
+    const fallbackMessages = modelMessages.slice(-6); // 只保留最近 3 轮
+    console.log(`[Agent] Retrying with ${fallbackMessages.length} messages`);
+    try {
+      result = streamText({
+        model: modelProvider,
+        system: effectiveSystemPrompt + modeHint + saveDocHint,
+        messages: fallbackMessages,
+        tools,
+        stopWhen: stepCountIs(10),
+        temperature: 0.7,
+      });
+    } catch (retryErr: any) {
+      console.error("[Agent] Fallback also failed:", retryErr);
+      return Response.json(
+        { error: "模型调用失败，请检查 API 配置或稍后重试。" },
+        { status: 500 }
+      );
+    }
+  }
+
   return result.toUIMessageStreamResponse();
+}
+
+// 返回可用模型列表
+export async function GET() {
+  const models = Object.entries(MODEL_REGISTRY).map(([id, info]) => ({
+    id,
+    name: info.name,
+  }));
+  return Response.json({ models, defaultModel: DEFAULT_MODEL });
 }
