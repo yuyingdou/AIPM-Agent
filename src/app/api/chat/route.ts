@@ -1,11 +1,10 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
-import { streamText, tool, stepCountIs, convertToModelMessages } from "ai";
+import { streamText, generateText, tool, stepCountIs, convertToModelMessages } from "ai";
 import { z } from "zod";
 import { BRD_SYSTEM_PROMPT, detectSkillIntent } from "@/lib/brd-prompt";
 import { MRD_SYSTEM_PROMPT } from "@/lib/mrd-prompt";
-import { VIBE_PRD_SYSTEM_PROMPT } from "@/lib/vibe-prd-prompt";
 import {
   INTERACTIVE_LEARNING_PROMPT,
   OBSIDIAN_KNOWLEDGE_SAVER_PROMPT,
@@ -13,13 +12,14 @@ import {
 } from "@/lib/learning-skills-prompt";
 import {
   PRODUCT_INSIGHT_MINER_PROMPT,
-  AI_AGENT_PRD_WRITER_PROMPT,
-} from "@/lib/product-chain-prompt";
+} from "@/lib/insight-miner-prompt";
 import { HUASHU_DESIGN_PROMPT } from "@/lib/huashu-design-prompt";
+import { AI_AGENT_PRD_WRITER_PROMPT } from "@/lib/ai-prd-prompt";
+import { CHAPTER_GROUPS, EXTRACTION_PROMPT, chapterPrompt, assemblePrd } from "@/lib/prd-chapters";
 import { PRODUCT_TEARDOWN_PROMPT } from "@/lib/product-teardown-prompt";
 import { ACCELERATED_LEARNING_PROMPT } from "@/lib/accelerated-learning-prompt";
 
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 const deepseek = createOpenAICompatible({
   name: "deepseek",
@@ -76,10 +76,6 @@ const SKILL_REGISTRY: Record<string, { prompt: string; intro: string }> = {
     prompt: MRD_SYSTEM_PROMPT,
     intro: "📋 **MRD Writer** — 深入分析市场需求",
   },
-  vibe_prd: {
-    prompt: VIBE_PRD_SYSTEM_PROMPT,
-    intro: "⚡ **Vibe PRD Writer** — 把想法变成可执行的项目规范",
-  },
   ai_prd: {
     prompt: AI_AGENT_PRD_WRITER_PROMPT,
     intro: "📝 **正式 PRD Writer** — 给开发团队看的完整需求文档",
@@ -120,7 +116,7 @@ const SKILL_REGISTRY: Record<string, { prompt: string; intro: string }> = {
 // 通用 PM Agent prompt — 未匹配到具体 Skill 时的默认身份
 const GENERAL_PM_PROMPT = `你是 AI PM Agent，一个全能型产品经理助手。你拥有以下专业技能，根据用户需求自动匹配：
 
-**产品决策链**：灵感挖掘 🔍 / BRD 📊 / MRD 📋 / Vibe PRD ⚡ / 正式 PRD 📝
+**产品决策链**：灵感挖掘 🔍 / BRD 📊 / MRD 📋 / 正式 PRD 📝
 **产品设计**：原型设计 🎨
 **能力建设**：交互式学习 🎓 / 48h加速学习 ⏱️ / 产品拆解 🔧 / 文章共创 ✍️
 **知识沉淀**：知识沉淀 💾
@@ -302,6 +298,99 @@ export async function POST(req: Request) {
 
   console.log(`[Agent] Using model: ${modelKey}`);
 
+  // ============================================================
+  // PRD 专用路由：多步并行生成 + 代码组装 + LLM 复印输出
+  // ============================================================
+  let result: any; // 提前声明，PRD 和其他 skill 共用
+
+  if (skillIntent === "ai_prd") {
+    const lastUserMsg = userMessages[userMessages.length - 1]?.content || firstUserText;
+
+    try {
+      // Phase 1: 提取用户需求
+      console.log("[PRD] Phase 1: Extracting requirements...");
+      const extraction = await generateText({
+        model: modelProvider,
+        system: EXTRACTION_PROMPT,
+        messages: [{ role: "user", content: lastUserMsg }],
+        temperature: 0.3,
+      });
+      const extractedInfo = extraction.text.trim();
+
+      // Phase 2: 解析元信息
+      let productName = "产品", version = "V1.0.0", author = "PM";
+      try {
+        const parsed = JSON.parse(extractedInfo.replace(/```json\n?/g, "").replace(/```/g, "").trim());
+        productName = parsed.productName || "产品";
+        version = parsed.version || "V1.0.0";
+        author = parsed.author || "PM";
+      } catch { /* ok */ }
+
+      const now = new Date();
+      const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
+      const docTitle = `【${version}】${productName} PRD`;
+
+      // Phase 3: Web 搜索
+      let searchResults = "";
+      if (process.env.TAVILY_API_KEY) {
+        try {
+          const sr = await fetch("https://api.tavily.com/search", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ api_key: process.env.TAVILY_API_KEY, query: `${productName} AI 大模型API价格 竞品 2026`, search_depth: "basic", max_results: 5 }),
+          });
+          const sd = await sr.json();
+          searchResults = (sd.results || []).map((r: any) => `- ${r.title}: ${r.content}`).join("\n");
+        } catch { /* ok */ }
+      }
+
+      // Phase 4: 5 个章节组并行生成
+      console.log("[PRD] Phase 4: Parallel chapter generation...");
+      const chapterResults = await Promise.all(
+        CHAPTER_GROUPS.map(async (group) => {
+          try {
+            const r = await generateText({
+              model: modelProvider,
+              system: chapterPrompt(group.id, group.title, group.chapters, extractedInfo, docTitle, searchResults),
+              messages: [{ role: "user", content: `生成 ${group.title}` }],
+              temperature: 0.7,
+              maxOutputTokens: 8000,
+            });
+            return r.text;
+          } catch (e) { console.error(`[PRD] ${group.id} failed:`, e); return null; }
+        })
+      );
+
+      // Phase 5: 代码组装文档
+      const assembledDoc = assemblePrd(docTitle, author, dateStr, chapterResults);
+      const filename = `PRD_${productName}_${dateStr}.md`;
+      console.log(`[PRD] Assembled: ${assembledDoc.length} chars`);
+
+      // Phase 6: 用 streamText 输出组装好的文档（LLM 原样转述，保证前端兼容）
+      result = streamText({
+        model: modelProvider,
+        system: `你是文档输出工具。用户给你一份已经写好的 Markdown 文档，你必须逐字输出它，不得改动一个字符。不要加前言、不要加后语、不要加任何解释。直接输出文档。`,
+        messages: [
+          { role: "user", content: `请输出以下文档，一字不改：\n\n${assembledDoc}` }
+        ],
+        tools,
+        temperature: 0,
+      });
+    } catch (err: any) {
+      console.error("[PRD] Multi-step failed, falling back:", err);
+      // 降级继续走普通 streamText
+    }
+  }
+
+  // PRD 处理完毕时 result 已设置，直接返回
+  if (result) {
+    return result.toUIMessageStreamResponse();
+  }
+
+  // ============================================================
+  // 普通路由（非 PRD skill 或 PRD 降级）
+  // ============================================================
+
   // 过滤掉停止后残留的空消息，避免后续请求出错
   const cleanMessages = messages.filter((m: any) => {
     if (m.role === "assistant") {
@@ -355,7 +444,6 @@ export async function POST(req: Request) {
 
   const modelMessages = await convertToModelMessages(safeMessages);
 
-  let result;
   try {
     result = streamText({
       model: modelProvider,
