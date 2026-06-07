@@ -47,7 +47,6 @@ const SKILL_GROUPS = [
       { id: "insight_miner", label: "灵感挖掘", icon: "🔍" },
       { id: "brd", label: "BRD", icon: "📊" },
       { id: "mrd", label: "MRD", icon: "📋" },
-      { id: "vibe_prd", label: "Vibe PRD", icon: "⚡" },
       { id: "ai_prd", label: "正式 PRD", icon: "📝" },
     ],
   },
@@ -82,7 +81,6 @@ const GROUPED_PROMPTS = [
       { tag: "挖掘", text: "帮我发现用户未被满足的痛点" },
       { tag: "评估", text: "帮我写BRD，评估这个方向值不值得做" },
       { tag: "分析", text: "帮我写MRD，分析这个赛道的市场需求" },
-      { tag: "速写", text: "帮我快速输出一份轻量级 PRD" },
       { tag: "规范", text: "帮我写一份完整的正式 PRD 文档" },
     ],
   },
@@ -137,6 +135,8 @@ export default function Home() {
   const [previewHtml, setPreviewHtml] = useState<string | null>(null);
   const [sidePanelHtml, setSidePanelHtml] = useState<string | null>(null);
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
+  const [feishuLoading, setFeishuLoading] = useState<Record<string, boolean>>({});
+  const [feishuUrls, setFeishuUrls] = useState<Record<string, string>>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const paletteRef = useRef<HTMLDivElement>(null);
@@ -307,6 +307,36 @@ export default function Home() {
   };
 
   const openPreview = (html: string) => setPreviewHtml(html);
+
+  // 推送文档到飞书
+  const handlePushToFeishu = async (
+    msgId: string,
+    docTitle: string,
+    docContent: string
+  ) => {
+    setFeishuLoading((prev) => ({ ...prev, [msgId]: true }));
+    try {
+      const res = await fetch("/api/feishu/push", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: docTitle, content: docContent }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setFeishuUrls((prev) => ({ ...prev, [msgId]: data.url }));
+      } else {
+        alert(`推送失败: ${data.error || "未知错误"}`);
+      }
+    } catch {
+      alert("推送失败，请检查网络或飞书配置");
+    } finally {
+      setFeishuLoading((prev) => ({ ...prev, [msgId]: false }));
+    }
+  };
+
+  const openFeishuUrl = (url: string) => {
+    window.open(url, "_blank");
+  };
 
   const currentSkillLabel =
     selectedSkill === "auto"
@@ -735,12 +765,22 @@ export default function Home() {
                                 );
                               }
                               // 不是 HTML — 正常显示
+                              // 大文档流式生成时（>5000字符），只显示进度指示，避免 DOM 频繁重排导致浏览器崩溃
+                              const isLargeStreamingDoc = isAssistantStreaming && textContent.length > 5000;
                               return (
                                 <div style={{color:"#EDE8E0",whiteSpace:"pre-wrap",lineHeight:1.8,fontSize:"0.95rem"}}>
                                   {isHtml && isAssistantStreaming ? (
                                     <div className="flex items-center gap-2 py-3" style={{ color: "var(--text-muted)" }}>
                                       <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: "var(--accent-dim)" }} />
                                       正在生成原型...
+                                    </div>
+                                  ) : isLargeStreamingDoc ? (
+                                    <div className="flex flex-col items-center gap-3 py-8" style={{ color: "var(--text-muted)" }}>
+                                      <span className="w-3 h-3 rounded-full animate-pulse" style={{ background: "var(--accent-dim)" }} />
+                                      <div className="text-sm">正在生成文档...</div>
+                                      <div className="text-xs" style={{ color: "var(--text-muted)", opacity: 0.6 }}>
+                                        已生成 {(textContent.length / 1000).toFixed(1)}k 字符
+                                      </div>
                                     </div>
                                   ) : (
                                     textContent
@@ -762,27 +802,52 @@ export default function Home() {
                                 : `文档片段`;
                               const now = new Date();
                               const ds = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,"0")}${String(now.getDate()).padStart(2,"0")}`;
+                              const feishuUrl = feishuUrls[`doc-${message.id}`];
+                              const feishuBusy = feishuLoading[`doc-${message.id}`];
                               return (
-                                <button
-                                  onClick={() => {
-                                    const blob = new Blob([txt], { type: "text/markdown;charset=utf-8" });
-                                    const url = URL.createObjectURL(blob);
-                                    const a = document.createElement("a");
-                                    a.href = url;
-                                    a.download = `${fname}_${ds}.md`;
-                                    a.click();
-                                    URL.revokeObjectURL(url);
-                                  }}
-                                  className="mt-2 px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 transition-all duration-200 hover:opacity-80"
-                                  style={{
-                                    background: "var(--accent)",
-                                    color: "#fff",
-                                    display: "inline-flex",
-                                  }}
-                                >
-                                  <span>📥</span>
-                                  下载此文档
-                                </button>
+                                <div className="mt-2 flex gap-2">
+                                  <button
+                                    onClick={() => {
+                                      const blob = new Blob([txt], { type: "text/markdown;charset=utf-8" });
+                                      const url = URL.createObjectURL(blob);
+                                      const a = document.createElement("a");
+                                      a.href = url;
+                                      a.download = `${fname}_${ds}.md`;
+                                      a.click();
+                                      URL.revokeObjectURL(url);
+                                    }}
+                                    className="px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 transition-all duration-200 hover:opacity-80"
+                                    style={{
+                                      background: "var(--accent)",
+                                      color: "#fff",
+                                      display: "inline-flex",
+                                    }}
+                                  >
+                                    <span>📥</span>
+                                    下载此文档
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      if (feishuUrl) {
+                                        openFeishuUrl(feishuUrl);
+                                      } else {
+                                        handlePushToFeishu(`doc-${message.id}`, fname, txt);
+                                      }
+                                    }}
+                                    disabled={feishuBusy}
+                                    className="px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 transition-all duration-200 hover:opacity-80"
+                                    style={{
+                                      background: feishuUrl ? "#3370FF" : "var(--bg-elevated)",
+                                      border: feishuUrl ? "none" : "1px solid var(--border-default)",
+                                      color: feishuUrl ? "#fff" : "var(--text-secondary)",
+                                      display: "inline-flex",
+                                      cursor: feishuBusy ? "wait" : "pointer",
+                                    }}
+                                  >
+                                    <span>{feishuBusy ? "⏳" : feishuUrl ? "✅" : "📄"}</span>
+                                    {feishuBusy ? "推送中..." : feishuUrl ? "已在飞书打开" : "推送到飞书"}
+                                  </button>
+                                </div>
                               );
                             })()}
                           </>
@@ -834,25 +899,54 @@ export default function Home() {
                                     </span>
                                   </div>
                                   {isDocResult && (
-                                    <button
-                                      onClick={() => {
-                                        const blob = new Blob([toolResult.content], { type: "text/markdown;charset=utf-8" });
-                                        const url = URL.createObjectURL(blob);
-                                        const a = document.createElement("a");
-                                        a.href = url;
-                                        a.download = toolResult.filename;
-                                        a.click();
-                                        URL.revokeObjectURL(url);
-                                      }}
-                                      className="mt-1.5 w-full px-3 py-2 rounded-xl text-sm font-medium flex items-center justify-center gap-2 transition-all duration-200 hover:opacity-90"
-                                      style={{
-                                        background: "var(--accent)",
-                                        color: "#fff",
-                                      }}
-                                    >
-                                      <span>📥</span>
-                                      下载 {toolResult.filename}
-                                    </button>
+                                    <div className="mt-1.5 flex gap-2">
+                                      <button
+                                        onClick={() => {
+                                          const blob = new Blob([toolResult.content], { type: "text/markdown;charset=utf-8" });
+                                          const url = URL.createObjectURL(blob);
+                                          const a = document.createElement("a");
+                                          a.href = url;
+                                          a.download = toolResult.filename;
+                                          a.click();
+                                          URL.revokeObjectURL(url);
+                                        }}
+                                        className="flex-1 px-3 py-2 rounded-xl text-sm font-medium flex items-center justify-center gap-2 transition-all duration-200 hover:opacity-90"
+                                        style={{
+                                          background: "var(--accent)",
+                                          color: "#fff",
+                                        }}
+                                      >
+                                        <span>📥</span>
+                                        下载 {toolResult.filename}
+                                      </button>
+                                      {(() => {
+                                        const tid = `tool-${message.id}-${i}`;
+                                        const feishuUrl = feishuUrls[tid];
+                                        const feishuBusy = feishuLoading[tid];
+                                        return (
+                                          <button
+                                            onClick={() => {
+                                              if (feishuUrl) {
+                                                openFeishuUrl(feishuUrl);
+                                              } else {
+                                                const docTitle = toolResult.filename.replace(/\.md$/, "");
+                                                handlePushToFeishu(tid, docTitle, toolResult.content);
+                                              }
+                                            }}
+                                            disabled={feishuBusy}
+                                            className="px-3 py-2 rounded-xl text-sm font-medium flex items-center justify-center gap-2 transition-all duration-200 hover:opacity-90 disabled:opacity-60"
+                                            style={{
+                                              background: feishuUrl ? "#3370FF" : "var(--bg-elevated)",
+                                              border: feishuUrl ? "none" : "1px solid var(--border-default)",
+                                              color: feishuUrl ? "#fff" : "var(--text-secondary)",
+                                            }}
+                                          >
+                                            <span>{feishuBusy ? "⏳" : feishuUrl ? "✅" : "📄"}</span>
+                                            {feishuBusy ? "推送中..." : feishuUrl ? "已推送" : "飞书"}
+                                          </button>
+                                        );
+                                      })()}
+                                    </div>
                                   )}
                                 </div>
                               );
